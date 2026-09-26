@@ -1,0 +1,112 @@
+name: VLC 4 Android ARM64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vlc4-arm64-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      # Same images as buildsystem/gitlab/.gitlab-ci.yml, pinned by digest.
+      ANDROID_IMAGE: registry.videolan.org/vlc-debian-android:20260610055743@sha256:5a050fb64299a27d68bdb944fc23c8e4d3b401a42c2abe3683fbd199fc30514d
+      WEB_IMAGE: registry.videolan.org/videolan-alpine-node:20230523124511@sha256:4012725844544a943eade25b62dd34650b7f648c36f3aceec718fbd1a317c2a4
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Record build inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-artifacts/logs
+          {
+            echo "repository=$GITHUB_REPOSITORY"
+            echo "repository_commit=$(git rev-parse HEAD)"
+            echo "run_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "android_image=$ANDROID_IMAGE"
+            echo "web_image=$WEB_IMAGE"
+            echo "build_command=./buildsystem/compile.sh -a arm64-v8a -vlc4 -t"
+            echo "variant=Dev (upstream default, debug signed)"
+            echo "GRADLE_ABI=ARMv8"
+            echo "prebuilt_contribs=preferred; upstream falls back to source if unavailable"
+            echo "product_source_changes=none"
+            echo "playback_test=not_performed"
+            date -u +"started_utc=%Y-%m-%dT%H:%M:%SZ"
+            df -h .
+          } | tee build-artifacts/build-info.txt
+          git ls-files -z | xargs -0 sha256sum > build-artifacts/source-files.sha256
+
+      - name: Build upstream remote access assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull "$WEB_IMAGE"
+          docker run --rm --user 0 --entrypoint /bin/sh \
+            --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
+            "$WEB_IMAGE" -c \
+            'git config --global --add safe.directory /workspace; node --version; npm --version; ./buildsystem/compile-remoteaccess.sh' \
+            2>&1 | tee build-artifacts/logs/remote-access.log
+
+      - name: Build and verify VLC 4 ARM64 Dev APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull "$ANDROID_IMAGE"
+          docker run --rm --user 0 --entrypoint /bin/bash \
+            --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
+            --env GRADLE_ABI=ARMv8 --env GITHUB_SHA --env GITHUB_RUN_ID \
+            --env GITHUB_REPOSITORY --env GITHUB_SERVER_URL --env ANDROID_IMAGE \
+            "$ANDROID_IMAGE" .github/scripts/build-vlc4-arm64.sh \
+            2>&1 | tee build-artifacts/logs/android-build.log
+
+      - name: Verify unchanged tracked sources
+        if: always()
+        shell: bash
+        run: |
+          git diff --exit-code HEAD
+          sha256sum --check --quiet build-artifacts/source-files.sha256
+
+      - name: Upload installable APK and provenance
+        id: apk
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: VLC-4-Android-ARM64
+          path: build-artifacts/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Publish build result
+        env:
+          ARTIFACT_URL: ${{ steps.apk.outputs.artifact-url }}
+        shell: bash
+        run: |
+          {
+            echo 'VLC4_ANDROID_ARM64_BUILD=PASS'
+            echo
+            echo "[Download VLC-4-Android-ARM64]($ARTIFACT_URL)"
+            echo
+            cat build-artifacts/apk-report.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: VLC-4-Android-ARM64-diagnostics
+          path: |
+            build-artifacts/**/*.txt
+            build-artifacts/**/*.log
+            build-artifacts/**/*.json
+          if-no-files-found: warn
+          retention-days: 14
