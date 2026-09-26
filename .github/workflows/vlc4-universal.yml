@@ -1,0 +1,127 @@
+name: VLC 4 Android Universal
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vlc4-universal-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ANDROID_IMAGE: registry.videolan.org/vlc-debian-android:20260610055743@sha256:5a050fb64299a27d68bdb944fc23c8e4d3b401a42c2abe3683fbd199fc30514d
+  WEB_IMAGE: registry.videolan.org/videolan-alpine-node:20230523124511@sha256:4012725844544a943eade25b62dd34650b7f648c36f3aceec718fbd1a317c2a4
+
+jobs:
+  native:
+    name: Native ${{ matrix.abi }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [armeabi-v7a, arm64-v8a, x86, x86_64]
+    env:
+      ANDROID_ABI: ${{ matrix.abi }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build official native libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-artifacts/logs
+          docker pull "$ANDROID_IMAGE"
+          docker run --rm --user 0 --entrypoint /bin/bash \
+            --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
+            --env ANDROID_ABI --env ANDROID_IMAGE --env GITHUB_SHA \
+            "$ANDROID_IMAGE" .github/scripts/build-vlc4-universal.sh native \
+            2>&1 | tee "build-artifacts/logs/native-$ANDROID_ABI.log"
+      - name: Upload native libraries and provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: VLC-4-native-${{ matrix.abi }}
+          path: build-artifacts/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Upload native failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: VLC-4-failure-native-${{ matrix.abi }}-${{ github.run_attempt }}
+          path: build-artifacts/
+          retention-days: 7
+
+  assemble:
+    name: Assemble and verify universal APK
+    needs: native
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download all four native builds
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: VLC-4-native-*
+          path: native-input
+          merge-multiple: true
+      - name: Build official remote access assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-artifacts/logs
+          docker pull "$WEB_IMAGE"
+          docker run --rm --user 0 --entrypoint /bin/sh \
+            --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
+            "$WEB_IMAGE" -c \
+            'git config --global --add safe.directory /workspace; ./buildsystem/compile-remoteaccess.sh' \
+            2>&1 | tee build-artifacts/logs/remote-access.log
+      - name: Assemble and verify all architectures and TV manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull "$ANDROID_IMAGE"
+          docker run --rm --user 0 --entrypoint /bin/bash \
+            --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
+            --env ANDROID_IMAGE --env GITHUB_SHA --env GITHUB_RUN_ID \
+            --env GITHUB_REPOSITORY --env GITHUB_SERVER_URL \
+            "$ANDROID_IMAGE" .github/scripts/build-vlc4-universal.sh assemble \
+            2>&1 | tee build-artifacts/logs/universal-build.log
+      - name: Upload universal APK and build evidence
+        id: apk
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: VLC-4-Android-Universal
+          path: build-artifacts/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+      - name: Publish result
+        env:
+          ARTIFACT_URL: ${{ steps.apk.outputs.artifact-url }}
+        shell: bash
+        run: |
+          {
+            echo 'VLC4_ANDROID_UNIVERSAL_BUILD=PASS'
+            echo
+            echo "[Download VLC-4-Android-Universal]($ARTIFACT_URL)"
+            echo
+            cat build-artifacts/apk-report.md
+            echo
+            echo 'Requires Android API 23 or newer. Fire OS 5 and Vega OS are not supported by this APK. Device playback performance is not tested by this build.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload assembly failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: VLC-4-universal-failure
+          path: build-artifacts/
+          retention-days: 7
