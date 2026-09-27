@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Shared single-ABI build; retain ARM64 as the original workflow's default.
+ANDROID_ABI=${ANDROID_ABI:-arm64-v8a}
+case "$ANDROID_ABI" in
+    arm64-v8a)
+        export GRADLE_ABI=ARMv8 BUILD_RESULT=VLC4_ANDROID_ARM64_BUILD
+        contrib_arch=arm64
+        contrib_triplet=aarch64-linux-android
+        ;;
+    armeabi-v7a)
+        export GRADLE_ABI=ARMv7 BUILD_RESULT=VLC4_ANDROID_ARMV7_BUILD
+        contrib_arch=arm
+        contrib_triplet=arm-linux-androideabi
+        ;;
+    *) echo "Unsupported single ABI: $ANDROID_ABI" >&2; exit 1 ;;
+esac
+export EXPECTED_ABIS="$ANDROID_ABI"
+export BUILD_COMMAND="./buildsystem/compile.sh -a $ANDROID_ABI -vlc4 -t"
+
 git config --global --add safe.directory /workspace
 # Upstream get-vlc.sh applies VideoLAN's own bundled patches with git am.
 git config --global user.name 'VLC Android CI'
@@ -22,7 +40,7 @@ export GRADLE_OPTS='-Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.workers.max=2 -Dorg
 
 # This is the official initialization path; it fetches the repository-pinned
 # libvlcjni and VLC sources and validates/downloads the pinned Gradle version.
-./buildsystem/compile.sh --init -a arm64-v8a -vlc4
+./buildsystem/compile.sh --init -a "$ANDROID_ABI" -vlc4
 
 record_sources() {
     for source in . libvlcjni libvlcjni/vlc medialibrary/medialibrary medialibrary/medialibrary/libvlcpp application/remote-access-client/remoteaccess; do
@@ -43,13 +61,13 @@ find libvlcjni -path '*/patches/*' -type f -print0 | sort -z | xargs -0 -r sha25
     grep -E 'VLC_TESTED_HASH=|VLC_REPOSITORY=|VLC_BRANCH=' libvlcjni/buildsystem/get-vlc.sh
 } | tee -a "$report/build-info.txt"
 
-contrib_sha=$(cd libvlcjni/vlc && extras/ci/get-contrib-sha.sh android-arm64)
-contrib_url="https://artifacts.videolan.org/vlc/android-arm64/vlc-contrib-aarch64-linux-android-${contrib_sha}.tar.bz2"
+contrib_sha=$(cd libvlcjni/vlc && extras/ci/get-contrib-sha.sh "android-$contrib_arch")
+contrib_url="https://artifacts.videolan.org/vlc/android-${contrib_arch}/vlc-contrib-${contrib_triplet}-${contrib_sha}.tar.bz2"
 printf 'contrib_identifier=%s\ncontrib_url=%s\n' "$contrib_sha" "$contrib_url" | tee -a "$report/build-info.txt"
 
 # No release signing, source-check bypass, source patch, or playback test.
 # -t lets the upstream script use prebuilt contribs when its URL check succeeds.
-./buildsystem/compile.sh -a arm64-v8a -vlc4 -t
+./buildsystem/compile.sh -a "$ANDROID_ABI" -vlc4 -t
 
 record_sources | tee "$report/source-revisions-after.txt"
 git diff --exit-code HEAD

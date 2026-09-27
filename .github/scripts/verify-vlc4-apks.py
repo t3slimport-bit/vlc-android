@@ -21,8 +21,14 @@ if not apks:
 
 records = []
 for apk in apks:
-    if (out / apk.name).exists():
-        raise SystemExit(f"Duplicate APK basename: {apk.name}")
+    artifact_name = apk.name
+    filename_abi = os.environ.get("APK_FILENAME_ABI")
+    if filename_abi:
+        if expected_abis != [filename_abi] or not apk.name.endswith("-all.apk"):
+            raise SystemExit("ABI filename requires one expected ABI and an upstream all APK")
+        artifact_name = apk.name.removesuffix("-all.apk") + f"-{filename_abi}.apk"
+    if (out / artifact_name).exists():
+        raise SystemExit(f"Duplicate APK basename: {artifact_name}")
     with zipfile.ZipFile(apk) as archive:
         native = [n for n in archive.namelist() if n.startswith("lib/") and n.endswith(".so")]
         abis = sorted({n.split("/")[1] for n in native})
@@ -55,15 +61,15 @@ for apk in apks:
     touchscreen_optional = "uses-feature-not-required: name='android.hardware.touchscreen'" in badging
     if os.environ.get("REQUIRE_TV") == "1" and (minimum_sdk != 23 or not tv_launcher or not touchscreen_optional):
         raise SystemExit(f"Expected upstream API 23 minimum and TV support in {apk}")
-    (out / f"{apk.name}.signature.txt").write_text(signature)
-    (out / f"{apk.name}.badging.txt").write_text(badging)
-    shutil.copy2(apk, out / apk.name)
+    (out / f"{artifact_name}.signature.txt").write_text(signature)
+    (out / f"{artifact_name}.badging.txt").write_text(badging)
+    shutil.copy2(apk, out / artifact_name)
     digest = hashlib.sha256()
     with apk.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     records.append({
-        "filename": apk.name,
+        "filename": artifact_name,
         "source_path": str(apk.relative_to(root)),
         "size_bytes": apk.stat().st_size,
         "sha256": digest.hexdigest(),
